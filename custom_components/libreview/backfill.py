@@ -465,7 +465,13 @@ def _execute_recorder_backfill(
     )
     from homeassistant.components.recorder.statistics import import_statistics
     from homeassistant.components.recorder.util import session_scope
-    from homeassistant.util.json import json_bytes
+
+    try:
+        from homeassistant.helpers.json import json_bytes
+    except ImportError:
+
+        def json_bytes(obj: Any) -> bytes:
+            return json.dumps(obj, separators=(",", ":")).encode("utf-8")
 
     if not points:
         return 0
@@ -608,7 +614,7 @@ def _execute_recorder_backfill(
                     attributes_id=attributes_id,
                     last_updated_ts=pt.timestamp_ts,
                     last_changed_ts=None,
-                    last_reported_ts=pt.timestamp_ts,
+                    last_reported_ts=None,
                     origin_idx=0,
                 )
             )
