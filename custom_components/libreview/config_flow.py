@@ -10,10 +10,14 @@ from homeassistant.data_entry_flow import FlowResult
 from LibreView import LibreView
 
 from .const import (
+    CONF_BACKFILL,
+    CONF_BACKFILL_INTERVAL_HOURS,
     CONF_REGION,
     CONF_SENSOR_DURATION,
     CONF_SHOW_TREND_ARROW,
     CONF_UOM,
+    DEFAULT_BACKFILL,
+    DEFAULT_BACKFILL_INTERVAL_HOURS,
     DOMAIN,
     LOGGER,
     GlucoseUnitOfMeasurement,
@@ -53,6 +57,16 @@ class LibreViewOptionsFlowHandler(OptionsFlow):
         if self.entry.data.get(CONF_SHOW_TREND_ARROW) is not None:
             default_show_trend = bool(self.entry.data.get(CONF_SHOW_TREND_ARROW))
 
+        default_backfill = DEFAULT_BACKFILL
+        if self.entry.data.get(CONF_BACKFILL) is not None:
+            default_backfill = bool(self.entry.data.get(CONF_BACKFILL))
+
+        default_backfill_interval = DEFAULT_BACKFILL_INTERVAL_HOURS
+        if self.entry.data.get(CONF_BACKFILL_INTERVAL_HOURS) is not None:
+            default_backfill_interval = int(
+                self.entry.data.get(CONF_BACKFILL_INTERVAL_HOURS)
+            )
+
         default_region = "Standard"
         if self.entry.data.get(CONF_REGION) is not None:
             default_region = self.entry.data.get(CONF_REGION)
@@ -68,6 +82,11 @@ class LibreViewOptionsFlowHandler(OptionsFlow):
                     vol.Required(
                         CONF_SHOW_TREND_ARROW, default=default_show_trend
                     ): bool,
+                    vol.Required(CONF_BACKFILL, default=default_backfill): bool,
+                    vol.Required(
+                        CONF_BACKFILL_INTERVAL_HOURS,
+                        default=default_backfill_interval,
+                    ): vol.All(vol.Coerce(int), vol.Range(min=0)),
                     vol.Optional(CONF_REGION, default=default_region): vol.In(
                         [
                             "Standard",
@@ -95,6 +114,8 @@ class LibreViewConfigFlowHandler(ConfigFlow, domain=DOMAIN):
     uom: GlucoseUnitOfMeasurement
     sensor_duration: int
     show_trend_icon: bool
+    backfill: bool
+    backfill_interval_hours: int
     email: str
     entry: ConfigEntry
     password: str
@@ -140,6 +161,8 @@ class LibreViewConfigFlowHandler(ConfigFlow, domain=DOMAIN):
             self.uom = user_input[CONF_UOM]
             self.sensor_duration = user_input[CONF_SENSOR_DURATION]
             self.show_trend_icon = user_input[CONF_SHOW_TREND_ARROW]
+            self.backfill = user_input[CONF_BACKFILL]
+            self.backfill_interval_hours = user_input[CONF_BACKFILL_INTERVAL_HOURS]
             self.region = user_input[CONF_REGION]
             return self.async_create_entry(
                 title="LibreView",
@@ -149,6 +172,8 @@ class LibreViewConfigFlowHandler(ConfigFlow, domain=DOMAIN):
                     CONF_UOM: self.uom,
                     CONF_SENSOR_DURATION: int(self.sensor_duration),
                     CONF_SHOW_TREND_ARROW: bool(self.show_trend_icon),
+                    CONF_BACKFILL: bool(self.backfill),
+                    CONF_BACKFILL_INTERVAL_HOURS: int(self.backfill_interval_hours),
                     CONF_REGION: self.region,
                 },
             )
@@ -159,6 +184,11 @@ class LibreViewConfigFlowHandler(ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_UOM): vol.In(GlucoseUnitOfMeasurement),
                     vol.Required(CONF_SENSOR_DURATION, default=14): int,
                     vol.Required(CONF_SHOW_TREND_ARROW, default=False): bool,
+                    vol.Required(CONF_BACKFILL, default=DEFAULT_BACKFILL): bool,
+                    vol.Required(
+                        CONF_BACKFILL_INTERVAL_HOURS,
+                        default=DEFAULT_BACKFILL_INTERVAL_HOURS,
+                    ): vol.All(vol.Coerce(int), vol.Range(min=0)),
                     vol.Optional(CONF_REGION, default="Standard"): vol.In(
                         [
                             "Standard",

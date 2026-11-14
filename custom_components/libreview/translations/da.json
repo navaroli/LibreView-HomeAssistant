@@ -16,6 +16,8 @@
                     "uom": "Måleenhed for blodsukkermålinger",
                     "sensor_duration": "Hvor mange dage er din Libre sensor aktiv efter påsætning",
                     "show_trend_arrow": "Brug ikon til at vise glukosetendens",
+                    "backfill": "Genindlæs manglende historiske blodsukkermålinger efter udfald",
+                    "backfill_interval_hours": "Interval (i timer) for periodisk historisk genindlæsning (0 for at deaktivere)",
                     "region": "Region for API serveren, hvis sat til Standard auto findes denne"
                 }
             },
@@ -45,6 +47,8 @@
                     "uom": "Måleenhed for blodsukkermålinger",
                     "sensor_duration": "Hvor mange dage er din Libre sensor aktiv efter påsætning",
                     "show_trend_arrow": "Brug ikon til at vise glukosetendens",
+                    "backfill": "Genindlæs manglende historiske blodsukkermålinger efter udfald",
+                    "backfill_interval_hours": "Interval (i timer) for periodisk historisk genindlæsning (0 for at deaktivere)",
                     "region": "Region for API serveren, hvis sat til Standard auto findes denne"
                 }
             }

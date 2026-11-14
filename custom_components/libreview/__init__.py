@@ -25,6 +25,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Set up all platforms for this device/entry.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    coordinator.async_schedule_startup_backfill()
 
     async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
         LOGGER.debug("config options were changed")

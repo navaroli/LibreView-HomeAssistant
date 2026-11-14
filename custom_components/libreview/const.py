@@ -9,11 +9,20 @@ DOMAIN = "libreview"
 LOGGER = logging.getLogger(__package__)
 
 DEFAULT_SCAN_INTERVAL = timedelta(minutes=1)
+BACKFILL_GAP_THRESHOLD = timedelta(minutes=6)
+BACKFILL_RETRY_OFFSETS = (0, 2, 5)
+STARTUP_BACKFILL_OFFSETS = (0, 3)
 
 CONF_UOM = "uom"
 CONF_SENSOR_DURATION = "sensor_duration"
 CONF_SHOW_TREND_ARROW = "show_trend_arrow"
 CONF_REGION = "region"
+CONF_BACKFILL = "backfill"
+CONF_BACKFILL_INTERVAL_HOURS = "backfill_interval_hours"
+
+DEFAULT_BACKFILL = True
+# Periodic safety-net backfill interval in hours (0 disables periodic sweeps).
+DEFAULT_BACKFILL_INTERVAL_HOURS = 4
 
 
 DEFAULT_ICON = "mdi:diabetes"
