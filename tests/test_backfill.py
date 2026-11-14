@@ -274,6 +274,240 @@ class TestBackfillLogic(unittest.TestCase):
             )
         )
 
+    def test_recorder_imports_use_helpers_json_not_util_json(self) -> None:
+        tree = ast.parse(
+            (COMPONENT_DIR / "backfill.py").read_text(encoding="utf-8"),
+            filename="backfill.py",
+        )
+        imported_from: dict[str, set[str]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported_from.setdefault(node.module, set()).update(
+                    alias.name for alias in node.names
+                )
+
+        self.assertNotIn("homeassistant.util.json", imported_from)
+        self.assertIn("json_bytes", imported_from.get("homeassistant.helpers.json", set()))
+
+    def test_execute_recorder_backfill_imports_and_runs_cleanly(self) -> None:
+        from contextlib import contextmanager
+        from enum import IntEnum
+        from unittest.mock import MagicMock, patch
+
+        class FakeColumn:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def __lt__(self, other):
+                return ("lt", self.name, other)
+
+            def __le__(self, other):
+                return ("le", self.name, other)
+
+            def __gt__(self, other):
+                return ("gt", self.name, other)
+
+            def __ge__(self, other):
+                return ("ge", self.name, other)
+
+            def __eq__(self, other):  # type: ignore[override]
+                return ("eq", self.name, other)
+
+            def in_(self, other):
+                return ("in", self.name, other)
+
+            def asc(self):
+                return ("asc", self.name)
+
+            def desc(self):
+                return ("desc", self.name)
+
+        class FakeStates:
+            state_id = FakeColumn("state_id")
+            metadata_id = FakeColumn("metadata_id")
+            state = FakeColumn("state")
+            attributes_id = FakeColumn("attributes_id")
+            last_updated_ts = FakeColumn("last_updated_ts")
+            last_changed_ts = FakeColumn("last_changed_ts")
+            old_state_id = FakeColumn("old_state_id")
+            _next_id = 100
+
+            def __init__(self, **kwargs) -> None:
+                FakeStates._next_id += 1
+                self.state_id = FakeStates._next_id
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        class FakeStateAttributes:
+            attributes_id = FakeColumn("attributes_id")
+            hash = FakeColumn("hash")
+            shared_attrs = FakeColumn("shared_attrs")
+            _next_id = 500
+
+            def __init__(self, **kwargs) -> None:
+                FakeStateAttributes._next_id += 1
+                self.attributes_id = FakeStateAttributes._next_id
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+            @staticmethod
+            def hash_shared_attrs_bytes(b: bytes) -> int:
+                return sum(b) & 0xFFFFFFFF
+
+        class FakeStatesMeta:
+            def __init__(self, entity_id: str) -> None:
+                self.entity_id = entity_id
+                self.metadata_id = 7
+
+        class FakeStatistics:
+            id = FakeColumn("id")
+            metadata_id = FakeColumn("metadata_id")
+            start_ts = FakeColumn("start_ts")
+
+        class FakeStatisticsShortTerm:
+            id = FakeColumn("id")
+            metadata_id = FakeColumn("metadata_id")
+            start_ts = FakeColumn("start_ts")
+
+        class FakeMeanType(IntEnum):
+            NONE = 0
+            ARITHMETIC = 1
+
+        imported_calls: list[tuple] = []
+
+        def fake_import_statistics(instance, metadata, stats, table):
+            imported_calls.append((metadata, list(stats), table))
+            return True
+
+        @contextmanager
+        def fake_session_scope(*, session):
+            yield session
+
+        # Build minimal fake HA module tree
+        ha_mod = types.ModuleType("homeassistant")
+        comp_mod = types.ModuleType("homeassistant.components")
+        rec_mod = types.ModuleType("homeassistant.components.recorder")
+        rec_mod.DOMAIN = "recorder"
+        db_mod = types.ModuleType("homeassistant.components.recorder.db_schema")
+        db_mod.States = FakeStates
+        db_mod.StateAttributes = FakeStateAttributes
+        db_mod.StatesMeta = FakeStatesMeta
+        db_mod.Statistics = FakeStatistics
+        db_mod.StatisticsShortTerm = FakeStatisticsShortTerm
+        models_mod = types.ModuleType("homeassistant.components.recorder.models")
+        models_mod.StatisticMeanType = FakeMeanType
+        models_mod.StatisticMetaData = dict
+        stats_mod = types.ModuleType("homeassistant.components.recorder.statistics")
+        stats_mod.import_statistics = fake_import_statistics
+        util_mod = types.ModuleType("homeassistant.components.recorder.util")
+        util_mod.session_scope = fake_session_scope
+        helpers_mod = types.ModuleType("homeassistant.helpers")
+        helpers_json_mod = types.ModuleType("homeassistant.helpers.json")
+        helpers_json_mod.json_bytes = lambda obj: json.dumps(
+            obj, separators=(",", ":")
+        ).encode("utf-8")
+
+        added_states: list[FakeStates] = []
+
+        class FakeQuery:
+            def outerjoin(self, *args, **kwargs):
+                return self
+
+            def filter(self, *args, **kwargs):
+                return self
+
+            def order_by(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                return None
+
+            def all(self):
+                return [
+                    types.SimpleNamespace(
+                        state_id=s.state_id,
+                        state=s.state,
+                        last_updated_ts=s.last_updated_ts,
+                        last_changed_ts=getattr(s, "last_changed_ts", None),
+                        old_state_id=getattr(s, "old_state_id", None),
+                        shared_attrs=None,
+                        id=1,
+                        start_ts=None,
+                    )
+                    for s in added_states
+                ]
+
+            def update(self, *args, **kwargs):
+                return 0
+
+            def delete(self, *args, **kwargs):
+                return 0
+
+        class FakeSession:
+            def query(self, *args, **kwargs):
+                return FakeQuery()
+
+            def add(self, obj):
+                pass
+
+            def add_all(self, objs):
+                added_states.extend(objs)
+
+            def flush(self):
+                pass
+
+        fake_instance = MagicMock()
+        fake_instance.get_session.return_value = FakeSession()
+        fake_instance.states_meta_manager.get.return_value = 7
+        fake_instance.state_attributes_manager.get_from_cache.return_value = None
+        fake_instance.statistics_meta_manager.get_many.return_value = {
+            "sensor.nicolas_navaroli_glucose_level": (
+                42,
+                {
+                    "has_sum": False,
+                    "name": None,
+                    "unit_class": None,
+                    "unit_of_measurement": "mg/dl",
+                },
+            )
+        }
+        fake_instance.states_manager._last_committed_id = {}
+
+        pts = BACKFILL.build_backfill_points_from_graph(
+            self.conn,
+            [
+                FakeMeasurement(self._naive(10), 115, 115.0),
+                FakeMeasurement(self._naive(15), 110, 110.0),
+            ],
+            uom=CONST.GlucoseUnitOfMeasurement.MGDL,
+            use_trend_icons=True,
+        )
+
+        modules = {
+            "homeassistant": ha_mod,
+            "homeassistant.components": comp_mod,
+            "homeassistant.components.recorder": rec_mod,
+            "homeassistant.components.recorder.db_schema": db_mod,
+            "homeassistant.components.recorder.models": models_mod,
+            "homeassistant.components.recorder.statistics": stats_mod,
+            "homeassistant.components.recorder.util": util_mod,
+            "homeassistant.helpers": helpers_mod,
+            "homeassistant.helpers.json": helpers_json_mod,
+        }
+        with patch.dict(sys.modules, modules):
+            inserted = BACKFILL._execute_recorder_backfill(
+                fake_instance,
+                entity_id="sensor.nicolas_navaroli_glucose_level",
+                points=pts,
+                unit_of_measurement="mg/dl",
+                friendly_name="Nicolas Navaroli glucose level",
+            )
+
+        self.assertEqual(inserted, 2)
+        self.assertEqual(len(added_states), 2)
+        self.assertIsNone(added_states[0].last_reported_ts)
+        self.assertEqual(len(imported_calls), 2)
+
     def test_manifests_translations_and_python_syntax(self) -> None:
         for py_file in COMPONENT_DIR.glob("*.py"):
             ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
