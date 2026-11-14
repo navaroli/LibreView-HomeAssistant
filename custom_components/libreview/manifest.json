@@ -4,7 +4,7 @@
     "codeowners": ["@PTST"],
     "config_flow": true,
     "dependencies": [],
-    "after_dependencies": ["recorder"],
+    "after_dependencies": ["recorder", "influxdb"],
     "documentation": "https://github.com/PTST/LibreView-HomeAssistant",
     "iot_class": "cloud_polling",
     "issue_tracker": "https://github.com/PTST/LibreView-HomeAssistant/issues",

@@ -1,4 +1,4 @@
-"""Historical glucose data backfill into Home Assistant Recorder."""
+"""Historical glucose data backfill into Home Assistant Recorder and InfluxDB."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import bisect
 import json
 import logging
 import math
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -41,6 +42,13 @@ MAX_BRIDGE_GAP_SECONDS = 1800.0
 # Maximum duration (seconds) a single reading carries forward when compiling
 # 5-minute / hourly statistics if no newer reading arrives.
 MAX_STAT_CARRY_SECONDS = 1800.0
+
+# Optional Home Assistant InfluxDB integration support
+INFLUXDB_DOMAIN = "influxdb"
+INFLUX_STARTUP_SYNC_LOOKBACK_SECONDS = 86400.0
+INFLUX_BATCH_CHUNK_SIZE = 80
+INFLUX_BATCH_SLICE_DELAY_SECONDS = 2.0
+DATA_INFLUX_SYNCED_ENTITIES = f"{DOMAIN}_influx_synced_entities"
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,6 +450,188 @@ def should_trigger_periodic_backfill(
     return (now - last_check) >= timedelta(hours=interval_hours)
 
 
+def _get_influx_threads(hass: HomeAssistant) -> list[Any]:
+    """Return active Home Assistant InfluxThread writer instances if configured."""
+    threads: list[Any] = []
+    seen_ids: set[int] = set()
+
+    config_entries = getattr(hass, "config_entries", None)
+    if config_entries is not None and hasattr(config_entries, "async_loaded_entries"):
+        for entry in config_entries.async_loaded_entries(INFLUXDB_DOMAIN):
+            runtime_data = getattr(entry, "runtime_data", None)
+            if (
+                runtime_data is not None
+                and hasattr(runtime_data, "queue")
+                and hasattr(runtime_data, "event_to_json")
+            ):
+                seen_ids.add(id(runtime_data))
+                threads.append(runtime_data)
+
+    hass_data = getattr(hass, "data", None)
+    if isinstance(hass_data, dict):
+        legacy = hass_data.get(INFLUXDB_DOMAIN)
+        if (
+            legacy is not None
+            and id(legacy) not in seen_ids
+            and hasattr(legacy, "queue")
+            and hasattr(legacy, "event_to_json")
+        ):
+            threads.append(legacy)
+
+    return threads
+
+
+def _enqueue_influxdb_backfill(
+    hass: HomeAssistant,
+    entity_id: str,
+    payloads: Sequence[tuple[float, str, dict[str, Any]]],
+    mark_initial_sync: bool = False,
+) -> int:
+    """Push historical backfilled readings to loaded HA InfluxDB writer threads.
+
+    Must run on the Home Assistant event loop thread.
+    """
+    influx_threads = _get_influx_threads(hass)
+    if not influx_threads:
+        return 0
+
+    if mark_initial_sync and isinstance(getattr(hass, "data", None), dict):
+        synced: set[str] = hass.data.setdefault(DATA_INFLUX_SYNCED_ENTITIES, set())
+        synced.add(entity_id)
+
+    if not payloads:
+        return 0
+
+    try:
+        from homeassistant.const import EVENT_STATE_CHANGED
+        from homeassistant.core import Event, State
+    except ImportError:
+        LOGGER.debug(
+            "Home Assistant core Event/State unavailable; skipping InfluxDB backfill"
+        )
+        return 0
+
+    events: list[Any] = []
+    for timestamp_ts, state_str, attrs_dict in sorted(
+        payloads, key=lambda item: item[0]
+    ):
+        dt_utc = datetime.fromtimestamp(timestamp_ts, tz=timezone.utc)
+        state_obj = State(
+            entity_id=entity_id,
+            state=state_str,
+            attributes=attrs_dict,
+            last_changed=dt_utc,
+            last_reported=dt_utc,
+            last_updated=dt_utc,
+            last_updated_timestamp=timestamp_ts,
+        )
+        event_obj = Event(
+            EVENT_STATE_CHANGED,
+            data={
+                "entity_id": entity_id,
+                "old_state": None,
+                "new_state": state_obj,
+            },
+            time_fired_timestamp=timestamp_ts,
+        )
+        events.append(event_obj)
+
+    def _put_slice(batch: Sequence[Any]) -> None:
+        active_threads = _get_influx_threads(hass)
+        if not active_threads:
+            return
+        mono_now = time.monotonic()
+        for ev in batch:
+            for thread in active_threads:
+                if not getattr(thread, "_shutdown", False):
+                    thread.queue.put((mono_now, ev))
+
+    _put_slice(events[:INFLUX_BATCH_CHUNK_SIZE])
+
+    loop = getattr(hass, "loop", None)
+    for slice_idx, offset in enumerate(
+        range(INFLUX_BATCH_CHUNK_SIZE, len(events), INFLUX_BATCH_CHUNK_SIZE),
+        start=1,
+    ):
+        chunk = events[offset : offset + INFLUX_BATCH_CHUNK_SIZE]
+        if loop is not None and hasattr(loop, "call_later"):
+            loop.call_later(
+                INFLUX_BATCH_SLICE_DELAY_SECONDS * slice_idx,
+                _put_slice,
+                chunk,
+            )
+        else:
+            _put_slice(chunk)
+
+    LOGGER.info(
+        "Queued %d historical glucose reading(s) for %s to InfluxDB",
+        len(events),
+        entity_id,
+    )
+    return len(events)
+
+
+def _collect_recent_backfilled_payloads(
+    session: Any,
+    *,
+    metadata_id: int,
+    since_ts: float,
+    states_cls: Any,
+    state_attrs_cls: Any,
+    unit_of_measurement: str,
+    friendly_name: str,
+) -> list[tuple[float, str, dict[str, Any]]]:
+    """Read valid backfilled Recorder states (context_id_bin IS NULL) since since_ts."""
+    rows = (
+        session.query(
+            states_cls.state_id,
+            states_cls.state,
+            states_cls.last_updated_ts,
+            state_attrs_cls.shared_attrs,
+        )
+        .outerjoin(
+            state_attrs_cls,
+            states_cls.attributes_id == state_attrs_cls.attributes_id,
+        )
+        .filter(
+            states_cls.metadata_id == metadata_id,
+            states_cls.last_updated_ts >= since_ts,
+            states_cls.context_id_bin.is_(None),
+        )
+        .order_by(states_cls.last_updated_ts.asc(), states_cls.state_id.asc())
+        .all()
+    )
+    results: list[tuple[float, str, dict[str, Any]]] = []
+    for r in rows:
+        if r.last_updated_ts is None or r.state is None:
+            continue
+        ts = float(r.last_updated_ts)
+        rec = ExistingStateRecord(
+            state_id=r.state_id,
+            state=r.state,
+            last_updated_ts=ts,
+            last_changed_ts=None,
+            old_state_id=None,
+            measurement_ts=parse_measurement_ts_from_attrs(r.shared_attrs),
+        )
+        is_valid, _ = is_genuine_numeric_state(rec)
+        if not is_valid:
+            continue
+        attrs: dict[str, Any] = {}
+        if r.shared_attrs:
+            try:
+                loaded = json.loads(r.shared_attrs)
+                if isinstance(loaded, dict):
+                    attrs = loaded
+            except (ValueError, TypeError):
+                attrs = {}
+        attrs.setdefault("unit_of_measurement", unit_of_measurement)
+        attrs.setdefault("friendly_name", friendly_name)
+        attrs.setdefault("state_class", "measurement")
+        results.append((ts, str(r.state), attrs))
+    return results
+
+
 def _execute_recorder_backfill(
     instance: Any,
     *,
@@ -449,6 +639,8 @@ def _execute_recorder_backfill(
     points: list[BackfillPoint],
     unit_of_measurement: str,
     friendly_name: str,
+    influx_out: list[tuple[float, str, dict[str, Any]]] | None = None,
+    include_recent_backfills: bool = False,
 ) -> int:
     """Run on the Recorder thread to backfill States, ShortTerm, and Hourly stats."""
     from homeassistant.components.recorder import DOMAIN as RECORDER_DOMAIN
@@ -559,6 +751,18 @@ def _execute_recorder_backfill(
             points, existing_records, now_ts=now_ts
         )
         if not missing_points:
+            if influx_out is not None and include_recent_backfills:
+                influx_out.extend(
+                    _collect_recent_backfilled_payloads(
+                        session,
+                        metadata_id=metadata_id,
+                        since_ts=now_ts - INFLUX_STARTUP_SYNC_LOOKBACK_SECONDS,
+                        states_cls=States,
+                        state_attrs_cls=StateAttributes,
+                        unit_of_measurement=unit_of_measurement,
+                        friendly_name=friendly_name,
+                    )
+                )
             return 0
 
         stale_ids = identify_bridged_stale_state_ids(existing_records, missing_points)
@@ -576,11 +780,18 @@ def _execute_recorder_backfill(
         # Insert StateAttributes and States for each missing point
         attrs_cache: dict[str, int] = {}
         new_states: list[States] = []
+        influx_by_ts: dict[float, tuple[float, str, dict[str, Any]]] = {}
         for pt in missing_points:
             attrs_dict = pt.to_attributes_dict(
                 unit_of_measurement=unit_of_measurement,
                 friendly_name=friendly_name,
             )
+            if influx_out is not None:
+                influx_by_ts[round(pt.timestamp_ts, 3)] = (
+                    pt.timestamp_ts,
+                    pt.state_str,
+                    attrs_dict,
+                )
             attrs_bytes = json_bytes(attrs_dict)
             shared_attrs = attrs_bytes.decode("utf-8")
             attributes_id = attrs_cache.get(shared_attrs)
@@ -850,6 +1061,20 @@ def _execute_recorder_backfill(
                     "unit_of_measurement": unit_of_measurement,
                 }
 
+        if influx_out is not None:
+            if include_recent_backfills:
+                for ts, st, attrs in _collect_recent_backfilled_payloads(
+                    session,
+                    metadata_id=metadata_id,
+                    since_ts=now_ts - INFLUX_STARTUP_SYNC_LOOKBACK_SECONDS,
+                    states_cls=States,
+                    state_attrs_cls=StateAttributes,
+                    unit_of_measurement=unit_of_measurement,
+                    friendly_name=friendly_name,
+                ):
+                    influx_by_ts.setdefault(round(ts, 3), (ts, st, attrs))
+            influx_out.extend(influx_by_ts[k] for k in sorted(influx_by_ts))
+
     if latest_state_id is not None:
         instance.states_manager.pop_pending(entity_id)
         instance.states_manager._last_committed_id[entity_id] = latest_state_id
@@ -862,11 +1087,12 @@ def _execute_recorder_backfill(
         if hourly_stats:
             import_statistics(instance, stat_metadata, hourly_stats, Statistics)
 
-    LOGGER.info(
-        "Backfilled %d historical glucose reading(s) for %s",
-        inserted_count,
-        entity_id,
-    )
+    if inserted_count > 0:
+        LOGGER.info(
+            "Backfilled %d historical glucose reading(s) for %s",
+            inserted_count,
+            entity_id,
+        )
     return inserted_count
 
 
@@ -932,6 +1158,10 @@ async def async_queue_recorder_backfill(
         else uom.value
     )
 
+    influx_active = bool(_get_influx_threads(hass))
+    synced_entities: set[str] = hass.data.get(DATA_INFLUX_SYNCED_ENTITIES, set())
+    include_recent_for_influx = influx_active and (entity_id not in synced_entities)
+
     @dataclass(slots=True)
     class LibreViewBackfillTask(RecorderTask):
         """Recorder queue task to backfill historical LibreView measurements."""
@@ -940,16 +1170,35 @@ async def async_queue_recorder_backfill(
         backfill_points: list[BackfillPoint]
         uom_str: str
         entity_friendly_name: str
+        push_to_influx: bool
+        include_recent_backfills: bool
 
         def run(self, instance: Any) -> None:
             try:
+                influx_payloads: list[tuple[float, str, dict[str, Any]]] | None = (
+                    [] if self.push_to_influx else None
+                )
                 _execute_recorder_backfill(
                     instance,
                     entity_id=self.target_entity_id,
                     points=self.backfill_points,
                     unit_of_measurement=self.uom_str,
                     friendly_name=self.entity_friendly_name,
+                    influx_out=influx_payloads,
+                    include_recent_backfills=self.include_recent_backfills,
                 )
+                if (
+                    influx_payloads is not None
+                    and (influx_payloads or self.include_recent_backfills)
+                    and getattr(instance, "hass", None) is not None
+                ):
+                    instance.hass.loop.call_soon_threadsafe(
+                        _enqueue_influxdb_backfill,
+                        instance.hass,
+                        self.target_entity_id,
+                        influx_payloads,
+                        self.include_recent_backfills,
+                    )
             except Exception:
                 logging.getLogger(__package__).exception(
                     "Failed backfilling historical glucose data for %s",
@@ -963,6 +1212,8 @@ async def async_queue_recorder_backfill(
             backfill_points=points,
             uom_str=unit_str,
             entity_friendly_name=friendly_name,
+            push_to_influx=influx_active,
+            include_recent_backfills=include_recent_for_influx,
         )
     )
     return True

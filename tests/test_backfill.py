@@ -316,6 +316,9 @@ class TestBackfillLogic(unittest.TestCase):
             def in_(self, other):
                 return ("in", self.name, other)
 
+            def is_(self, other):
+                return ("is", self.name, other)
+
             def asc(self):
                 return ("asc", self.name)
 
@@ -330,6 +333,7 @@ class TestBackfillLogic(unittest.TestCase):
             last_updated_ts = FakeColumn("last_updated_ts")
             last_changed_ts = FakeColumn("last_changed_ts")
             old_state_id = FakeColumn("old_state_id")
+            context_id_bin = FakeColumn("context_id_bin")
             _next_id = 100
 
             def __init__(self, **kwargs) -> None:
@@ -494,6 +498,7 @@ class TestBackfillLogic(unittest.TestCase):
             "homeassistant.helpers": helpers_mod,
             "homeassistant.helpers.json": helpers_json_mod,
         }
+        influx_out: list[tuple[float, str, dict]] = []
         with patch.dict(sys.modules, modules):
             inserted = BACKFILL._execute_recorder_backfill(
                 fake_instance,
@@ -501,12 +506,134 @@ class TestBackfillLogic(unittest.TestCase):
                 points=pts,
                 unit_of_measurement="mg/dl",
                 friendly_name="Nicolas Navaroli glucose level",
+                influx_out=influx_out,
+                include_recent_backfills=True,
             )
 
         self.assertEqual(inserted, 2)
         self.assertEqual(len(added_states), 2)
         self.assertIsNone(added_states[0].last_reported_ts)
         self.assertEqual(len(imported_calls), 2)
+        self.assertEqual(len(influx_out), 2)
+        self.assertEqual([item[1] for item in influx_out], ["115", "110"])
+        self.assertEqual(influx_out[0][2]["unit_of_measurement"], "mg/dl")
+
+    def test_influxdb_backfill_enqueues_events_and_slices_batches(self) -> None:
+        import queue
+        from unittest.mock import patch
+
+        class FakeState:
+            def __init__(self, entity_id, state, attributes=None, **kwargs):
+                self.entity_id = entity_id
+                self.state = state
+                self.attributes = attributes or {}
+                self.domain, self.object_id = entity_id.split(".", 1)
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        class FakeEvent:
+            def __init__(self, event_type, data=None, time_fired_timestamp=None):
+                self.event_type = event_type
+                self.data = data or {}
+                self.time_fired_timestamp = time_fired_timestamp
+                self.time_fired = datetime.fromtimestamp(
+                    time_fired_timestamp, tz=timezone.utc
+                )
+
+        ha_mod = types.ModuleType("homeassistant")
+        const_mod = types.ModuleType("homeassistant.const")
+        const_mod.EVENT_STATE_CHANGED = "state_changed"
+        core_mod = types.ModuleType("homeassistant.core")
+        core_mod.State = FakeState
+        core_mod.Event = FakeEvent
+
+        class FakeInfluxThread:
+            def __init__(self) -> None:
+                self.queue: queue.SimpleQueue = queue.SimpleQueue()
+                self._shutdown = False
+
+            def event_to_json(self, event):
+                return {"time": event.time_fired}
+
+        influx_thread = FakeInfluxThread()
+        scheduled_later: list[tuple[float, object, tuple]] = []
+
+        class FakeLoop:
+            def call_later(self, delay, callback, *args):
+                scheduled_later.append((delay, callback, args))
+
+        class FakeConfigEntries:
+            def __init__(self, entries):
+                self._entries = entries
+
+            def async_loaded_entries(self, domain):
+                return self._entries if domain == "influxdb" else []
+
+        # 1. No-op when InfluxDB is not loaded
+        empty_hass = types.SimpleNamespace(
+            config_entries=FakeConfigEntries([]),
+            data={},
+            loop=FakeLoop(),
+        )
+        self.assertEqual(
+            BACKFILL._enqueue_influxdb_backfill(
+                empty_hass,
+                "sensor.nicolas_navaroli_glucose_level",
+                [(1000.0, "105", {"unit_of_measurement": "mg/dl"})],
+                True,
+            ),
+            0,
+        )
+        self.assertNotIn(BACKFILL.DATA_INFLUX_SYNCED_ENTITIES, empty_hass.data)
+
+        # 2. Enqueues historical State/Event items when InfluxDB ConfigEntry is loaded
+        loaded_entry = types.SimpleNamespace(runtime_data=influx_thread)
+        hass = types.SimpleNamespace(
+            config_entries=FakeConfigEntries([loaded_entry]),
+            data={},
+            loop=FakeLoop(),
+        )
+        payloads = [
+            (
+                self._ts(i),
+                str(90 + (i % 20)),
+                {"unit_of_measurement": "mg/dl", "value_mg_dl": 90 + (i % 20)},
+            )
+            for i in range(95)
+        ]
+        with patch.dict(
+            sys.modules,
+            {
+                "homeassistant": ha_mod,
+                "homeassistant.const": const_mod,
+                "homeassistant.core": core_mod,
+            },
+        ):
+            queued = BACKFILL._enqueue_influxdb_backfill(
+                hass,
+                "sensor.nicolas_navaroli_glucose_level",
+                payloads,
+                True,
+            )
+
+        self.assertEqual(queued, 95)
+        self.assertIn(
+            "sensor.nicolas_navaroli_glucose_level",
+            hass.data[BACKFILL.DATA_INFLUX_SYNCED_ENTITIES],
+        )
+        # First 80 placed immediately, remaining 15 scheduled via call_later
+        self.assertEqual(influx_thread.queue.qsize(), BACKFILL.INFLUX_BATCH_CHUNK_SIZE)
+        self.assertEqual(len(scheduled_later), 1)
+        delay, cb, args = scheduled_later[0]
+        self.assertAlmostEqual(delay, BACKFILL.INFLUX_BATCH_SLICE_DELAY_SECONDS)
+        cb(*args)
+        self.assertEqual(influx_thread.queue.qsize(), 95)
+
+        first_mono, first_event = influx_thread.queue.get_nowait()
+        self.assertIsInstance(first_mono, float)
+        self.assertEqual(first_event.event_type, "state_changed")
+        self.assertAlmostEqual(first_event.time_fired_timestamp, self._ts(0))
+        self.assertEqual(first_event.data["new_state"].state, "90")
 
     def test_manifests_translations_and_python_syntax(self) -> None:
         for py_file in COMPONENT_DIR.glob("*.py"):
