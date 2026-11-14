@@ -12,12 +12,14 @@ from LibreView import LibreView
 from .const import (
     CONF_BACKFILL,
     CONF_BACKFILL_INTERVAL_HOURS,
+    CONF_MAX_DATA_AGE,
     CONF_REGION,
     CONF_SENSOR_DURATION,
     CONF_SHOW_TREND_ARROW,
     CONF_UOM,
     DEFAULT_BACKFILL,
     DEFAULT_BACKFILL_INTERVAL_HOURS,
+    DEFAULT_MAX_DATA_AGE,
     DOMAIN,
     LOGGER,
     GlucoseUnitOfMeasurement,
@@ -53,6 +55,10 @@ class LibreViewOptionsFlowHandler(OptionsFlow):
         if self.entry.data.get(CONF_SENSOR_DURATION) is not None:
             default_duration = int(self.entry.data.get(CONF_SENSOR_DURATION))
 
+        default_max_data_age = DEFAULT_MAX_DATA_AGE
+        if self.entry.data.get(CONF_MAX_DATA_AGE) is not None:
+            default_max_data_age = int(self.entry.data.get(CONF_MAX_DATA_AGE))
+
         default_show_trend = False
         if self.entry.data.get(CONF_SHOW_TREND_ARROW) is not None:
             default_show_trend = bool(self.entry.data.get(CONF_SHOW_TREND_ARROW))
@@ -79,6 +85,7 @@ class LibreViewOptionsFlowHandler(OptionsFlow):
                         GlucoseUnitOfMeasurement
                     ),
                     vol.Required(CONF_SENSOR_DURATION, default=default_duration): int,
+                    vol.Required(CONF_MAX_DATA_AGE, default=default_max_data_age): int,
                     vol.Required(
                         CONF_SHOW_TREND_ARROW, default=default_show_trend
                     ): bool,
@@ -107,12 +114,15 @@ class LibreViewOptionsFlowHandler(OptionsFlow):
         )
 
 
-class LibreViewConfigFlowHandler(ConfigFlow, domain=DOMAIN):
+class LibreViewConfigFlowHandler(
+    ConfigFlow, domain=DOMAIN
+):  # pylint: disable=too-many-instance-attributes
     """Handle a config flow for LibreView."""
 
     VERSION = 1
     uom: GlucoseUnitOfMeasurement
     sensor_duration: int
+    max_data_age: int
     show_trend_icon: bool
     backfill: bool
     backfill_interval_hours: int
@@ -160,6 +170,7 @@ class LibreViewConfigFlowHandler(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self.uom = user_input[CONF_UOM]
             self.sensor_duration = user_input[CONF_SENSOR_DURATION]
+            self.max_data_age = user_input[CONF_MAX_DATA_AGE]
             self.show_trend_icon = user_input[CONF_SHOW_TREND_ARROW]
             self.backfill = user_input[CONF_BACKFILL]
             self.backfill_interval_hours = user_input[CONF_BACKFILL_INTERVAL_HOURS]
@@ -171,6 +182,7 @@ class LibreViewConfigFlowHandler(ConfigFlow, domain=DOMAIN):
                     CONF_PASSWORD: self.password,
                     CONF_UOM: self.uom,
                     CONF_SENSOR_DURATION: int(self.sensor_duration),
+                    CONF_MAX_DATA_AGE: int(self.max_data_age),
                     CONF_SHOW_TREND_ARROW: bool(self.show_trend_icon),
                     CONF_BACKFILL: bool(self.backfill),
                     CONF_BACKFILL_INTERVAL_HOURS: int(self.backfill_interval_hours),
@@ -183,6 +195,7 @@ class LibreViewConfigFlowHandler(ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(CONF_UOM): vol.In(GlucoseUnitOfMeasurement),
                     vol.Required(CONF_SENSOR_DURATION, default=14): int,
+                    vol.Required(CONF_MAX_DATA_AGE, default=DEFAULT_MAX_DATA_AGE): int,
                     vol.Required(CONF_SHOW_TREND_ARROW, default=False): bool,
                     vol.Required(CONF_BACKFILL, default=DEFAULT_BACKFILL): bool,
                     vol.Required(

@@ -15,6 +15,7 @@
                 "data": {
                     "uom": "Måleenhed for blodsukkermålinger",
                     "sensor_duration": "Hvor mange dage er din Libre sensor aktiv efter påsætning",
+                    "max_data_age": "Maksimal alder (i minutter) for en måling før sensoren markeres som utilgængelig (0 for at deaktivere)",
                     "show_trend_arrow": "Brug ikon til at vise glukosetendens",
                     "backfill": "Genindlæs manglende historiske blodsukkermålinger efter udfald",
                     "backfill_interval_hours": "Interval (i timer) for periodisk historisk genindlæsning (0 for at deaktivere)",
@@ -46,6 +47,7 @@
                 "data": {
                     "uom": "Måleenhed for blodsukkermålinger",
                     "sensor_duration": "Hvor mange dage er din Libre sensor aktiv efter påsætning",
+                    "max_data_age": "Maksimal alder (i minutter) for en måling før sensoren markeres som utilgængelig (0 for at deaktivere)",
                     "show_trend_arrow": "Brug ikon til at vise glukosetendens",
                     "backfill": "Genindlæs manglende historiske blodsukkermålinger efter udfald",
                     "backfill_interval_hours": "Interval (i timer) for periodisk historisk genindlæsning (0 for at deaktivere)",

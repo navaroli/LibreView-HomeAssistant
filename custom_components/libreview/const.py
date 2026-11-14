@@ -19,10 +19,14 @@ CONF_SHOW_TREND_ARROW = "show_trend_arrow"
 CONF_REGION = "region"
 CONF_BACKFILL = "backfill"
 CONF_BACKFILL_INTERVAL_HOURS = "backfill_interval_hours"
+CONF_MAX_DATA_AGE = "max_data_age"
 
 DEFAULT_BACKFILL = True
 # Periodic safety-net backfill interval in hours (0 disables periodic sweeps).
 DEFAULT_BACKFILL_INTERVAL_HOURS = 4
+# Maximum age (in minutes) a glucose reading is allowed to have before the
+# glucose sensor entities are reported as unavailable. 0 disables the check.
+DEFAULT_MAX_DATA_AGE = 15
 
 
 DEFAULT_ICON = "mdi:diabetes"
